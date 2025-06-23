@@ -1,0 +1,115 @@
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+from PIL import Image
+import pytesseract
+import io
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+# ---------- OCR Functions (Your Logic) ----------
+
+def extract_name(img: Image.Image):
+    img = img.convert('L')  # Convert to grayscale
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    keywords = ["Name"]
+
+    for keyword in keywords:
+        try:
+            idx = data['text'].index(keyword)  # Find keyword index
+            x, y, w, h = data['left'][idx], data['top'][idx], data['width'][idx], data['height'][idx]
+            region = (x - 60, y + h, x + w + 300, y + h + 50)  # Define region near keyword
+            text = pytesseract.image_to_string(img.crop(region), config='--psm 6')
+            return text.strip()
+        except ValueError:
+            continue
+    return None
+
+def extract_father_name(img: Image.Image):
+    img = img.convert('L')
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    keywords = ["Father's"]
+
+    for keyword in keywords:
+        try:
+            idx = data['text'].index(keyword)
+            x, y, w, h = data['left'][idx], data['top'][idx], data['width'][idx], data['height'][idx]
+            region = (x - 200, y + h, x + w + 300, y + h + 50)
+            text = pytesseract.image_to_string(img.crop(region), config='--psm 6')
+            return text.strip()
+        except ValueError:
+            continue
+    return None
+
+
+def extract_father_name_application(image_path):    
+    try:
+        img = Image.open(image_path).convert('L')
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+
+        def find_keyword_index(data, keyword_options):
+            import difflib
+            for i, word in enumerate(data['text']):
+                for keyword in keyword_options:
+                    if difflib.SequenceMatcher(None, word.lower(), keyword.lower()).ratio() > 0.8:
+                        return i
+            return -1
+
+        name_index = find_keyword_index(data, ["Father", "Fathers", "Father's", "Father’s"])
+
+        if name_index == -1:
+            print("Father keyword not found in the image.")
+            return None
+
+        x, y, w, h = data['left'][name_index], data['top'][name_index], data['width'][name_index], data['height'][name_index]
+
+        # Adjust region to be below the label and wide enough
+        name_region =  (x + 105, y, x +w+150, y + h)
+
+        name_text = pytesseract.image_to_string(img.crop(name_region), config='--psm 6')
+
+        return name_text.strip()
+
+    except Exception as e:
+        print(f"Error during name extraction: {e}")
+        return None
+
+
+# ---------- FastAPI Endpoint ----------
+
+@app.post("/extract-pan-details/")
+async def extract_pan_details(PAN_file: UploadFile = File(...),application_form:UploadFile = File(...)):
+    try:
+        # Read image bytes from the uploaded file
+        PAN_contents = await PAN_file.read()
+        application_contents=await application_form.read()
+        # Convert to PIL Image
+        PAN_image = Image.open(io.BytesIO(PAN_contents))
+        application_image=Image.open(io.BytesIO(application_contents))
+
+        # Run all 3 OCR extractors
+        name = extract_name(PAN_image)
+        father_name = extract_father_name(PAN_image)
+        
+
+        # Run all 3 OCR extractors        
+        application_father_name = extract_father_name_application(application_image)        
+
+        result =  (father_name == application_father_name)
+
+        return JSONResponse(content={
+            "name": name,
+            "father_name": father_name,            
+            "application_father": application_father_name,
+            "match": result
+        })
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
